@@ -1,0 +1,133 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+*.pyo
+*.pyd
+build/
+dist/
+wheels/
+*.egg-info
+*.egg
+.python-version
+*.so
+
+# Virtual environments
+.venv
+.envrc
+venv/
+env/
+ENV/
+/env
+
+# Environment and Secrets - CRITICAL
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.crt
+*.cert
+*.p12
+*.pfx
+secrets/
+credentials/
+.secrets
+.credentials
+config.json
+config.yaml
+config.yml
+!config.example.*
+.password
+.token
+
+# UV files
+pyproject.toml
+uv.lock
+
+# IDE and Editor files
+.vscode/
+.idea/
+.kilocode
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs and Temporary files
+.logs/
+*.log
+logs/
+*.tmp
+*.temp
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Distribution and Packaging
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyCharm
+.idea/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Backup files
+*.bak
+*.backup
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# OS-specific files
+Thumbs.db
+Desktop.ini
+
+# ngrok and tunneling
+ngrok
+ngrok.exe
+*.ngrok.io
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Local development
+.local/
+local_settings.py
+*.local
+
+# Coverage and profiling
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+*.prof
+.profiling/
+
+# MCP specific
+mcp_settings.json
+.mcp/
+z_mcp_concurrent_tester.py
+claude_mcp_directory_policy.md

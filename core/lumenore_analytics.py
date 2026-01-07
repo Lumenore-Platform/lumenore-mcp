@@ -264,8 +264,8 @@ class LumenoreAnalytics:
             self._get_auth_client()
             if not self.access_token:
                 raise AuthorizationError(
-                    "No valid authorization found. Please provide either "
-                    "LUMENORE_API_KEY or both LUMENORE_CLIENT_ID and LUMENORE_SECRET"
+                    "No valid authorization found. Please provide "
+                    "LUMENORE_CLIENT_ID and LUMENORE_SECRET"
                 )
 
         url = self._build_url(endpoint_name)

@@ -36,7 +36,7 @@ class ConfigModel(BaseSettings):
             and self.SECRET.strip()
         )
         if not token_provided and not client_credentials_provided:
-            raise ValueError("Either LUMENORE_API_KEY or both LUMENORE_CLIENT_ID and LUMENORE_SECRET must be provided")
+            raise ValueError("Please provide LUMENORE_CLIENT_ID and LUMENORE_SECRET must be provided")
         return self
 
     @property

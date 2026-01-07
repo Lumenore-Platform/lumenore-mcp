@@ -85,7 +85,6 @@ Then edit `.env` with your configuration:
 LUMENORE_CLIENT_ID="your_client_id_here"
 LUMENORE_SECRET="your_secret_here"
 SERVER_URL="https://preview.lumenore.com"
-DEBUG=true  # Optional: Enable debug logging
 ```
 
 ### Configuration Parameters
@@ -95,7 +94,6 @@ DEBUG=true  # Optional: Enable debug logging
 | `LUMENORE_CLIENT_ID` | Yes | Client ID for client credentials authentication | None |
 | `LUMENORE_SECRET` | Yes | Client secret for client credentials authentication | None |
 | `SERVER_URL` | No | Lumenore server URL | `https://preview.lumenore.com` |
-| `DEBUG` | No | Enable debug logging | `false` |
 
 ## Running the Server
 
@@ -532,24 +530,6 @@ We take security seriously. If you find a vulnerability:
     }
 }
 ```
-
-### Logging and Debugging
-
-**Enable debug logging**:
-```bash
-# Set in .env file
-DEBUG=true
-
-# Or export in terminal
-export DEBUG=true
-python main.py
-```
-
-**Check logs for**:
-- Server startup confirmation
-- Authorization token loading
-- Request timing information
-- Error stack traces
 
 **Manual testing with Python**:
 ```python

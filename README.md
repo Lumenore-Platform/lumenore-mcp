@@ -523,9 +523,6 @@ We take security seriously. If you find a vulnerability:
         "lumenore-server": {
             "type": "streamable-http",
             "url": "http://localhost:8080/mcp",
-            "headers": {
-                "Authorization": "Bearer Token"
-            }
         }
     }
 }

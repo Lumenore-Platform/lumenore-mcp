@@ -1,5 +1,3 @@
-# Copyright © Lumenore Inc. All rights reserved.
-
 import requests
 
 from exceptions.exceptions import AuthenticationError
@@ -56,10 +54,9 @@ class LumenoreAuthClient:
         url = f"{self.base_url}/api/secure/client/user-login"
         payload = {"data": {"clientId": self.client_id, "secret": self.secret}}
 
-        logger.info(f"{url = } {payload = }")
+        logger.debug(f"Authenticating to {url}")
 
         try:
-            logger.debug(f"Authenticating to {url}")
             response = self.session.post(
                 url,
                 json=payload,
@@ -67,8 +64,7 @@ class LumenoreAuthClient:
                 timeout=30,
             )
 
-            logger.info(response.status_code)
-            logger.info(response.cookies)
+            logger.debug(f"Authentication response status: {response.status_code}")
 
             if response.status_code == 200:
                 self.access_token = "Bearer " + response.cookies.get("access_token")

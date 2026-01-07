@@ -1,1 +1,0 @@
-# Copyright © Lumenore Inc. All rights reserved.

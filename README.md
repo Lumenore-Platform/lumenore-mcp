@@ -11,10 +11,11 @@ A Model Context Protocol (MCP) server that provides AI assistants with access to
 
 **1. Install & Run**
 ```bash
-git clone <repository-url>
+git clone https://github.com/Lumenore-Platform/lumenore-mcp.git
 cd lumenore-mcp
 pip install -r requirements.txt
-echo "LUMENORE_API_KEY=your_token_here" > .env
+cp .env.example .env
+# Edit .env with your client credentials (LUMENORE_CLIENT_ID and LUMENORE_SECRET)
 python main.py
 ```
 
@@ -59,25 +60,42 @@ This MCP server provides AI assistants with access to Lumenore's powerful analyt
 
 ### Prerequisites
 - Python 3.13+
-- Lumenore API token
+- Lumenore client credentials (client ID and secret)
 - Access to Lumenore server instance
 
 ### Setup
 ```bash
-git clone <repository-url>
+git clone https://github.com/Lumenore-Platform/lumenore-mcp.git
 cd lumenore-mcp
 pip install -r requirements.txt
 ```
 
 ## Configuration
 
-Create a `.env` file with your credentials:
+Create a `.env` file in the project root with your credentials. You can use `.env.example` as a template:
+
 ```bash
-echo "LUMENORE_API_KEY=your_jwt_token_here" > .env
-echo "SERVER_URL=https://your-server.com" >> .env  # Optional
+cp .env.example .env
 ```
 
-**Token Format**: Valid JWT without "Bearer " prefix (server adds this automatically)
+Then edit `.env` with your configuration:
+
+### Using Client Credentials
+```bash
+LUMENORE_CLIENT_ID="your_client_id_here"
+LUMENORE_SECRET="your_secret_here"
+SERVER_URL="https://preview.lumenore.com"
+DEBUG=true  # Optional: Enable debug logging
+```
+
+### Configuration Parameters
+
+| Parameter | Required | Description | Default |
+|-----------|----------|-------------|---------|
+| `LUMENORE_CLIENT_ID` | Yes | Client ID for client credentials authentication | None |
+| `LUMENORE_SECRET` | Yes | Client secret for client credentials authentication | None |
+| `SERVER_URL` | No | Lumenore server URL | `https://preview.lumenore.com` |
+| `DEBUG` | No | Enable debug logging | `false` |
 
 ## Running the Server
 
@@ -124,34 +142,25 @@ curl -I http://localhost:8080  # Should return HTTP/1.1 200 OK
 
 ## Authentication
 
-### Getting Your API Token
-1. Visit [https://preview.lumenore.com/](https://lumenore.com/) and sign in
-2. Go to Account Settings → API Access
-3. Generate a new token with required permissions
-4. Copy and store securely (won't be shown again)
+### Getting Your Credentials
 
-### Configuration
-Set your token in `.env` file:
-```bash
-LUMENORE_API_KEY=your_jwt_token_here
-```
+**Client Credentials**
+1. Contact Lumenore support to obtain client credentials
+2. Receive your `LUMENORE_CLIENT_ID` and `LUMENORE_SECRET`
+3. Store securely in your `.env` file
 
-**Token Requirements**:
-- Valid JWT format (no "Bearer " prefix)
-- Permissions: `read:datasets`, `read:analytics`, `read:nlq`, `read:predictions`
+See the [Configuration](#configuration) section for detailed setup instructions.
 
 ### Security Best Practices
-- ✅ Store in environment variables or secure vaults
-- ✅ Rotate tokens every 90 days
-- ✅ Use separate tokens for dev/prod
-- ❌ Don't commit tokens to version control
-- ❌ Don't share tokens or log them
+<!-- Add security best practices here by refering the code -->
 
-### Troubleshooting
+### Troubleshooting Authentication Issues
+
 **"Authorization token missing or invalid"**:
-- Verify `LUMENORE_API_KEY` is set
-- Check token format and expiration
+- Verify credentials are set in `.env` file:
+  - For client credentials: Check both `LUMENORE_CLIENT_ID` and `LUMENORE_SECRET` are set
 - Ensure Lumenore AI credits are available
+- Check `SERVER_URL` points to correct Lumenore instance
 
 ## Available Tools
 
@@ -341,27 +350,7 @@ Here are example prompts you can use with Claude when connected to this MCP serv
 
 ---
 
-## Configuration
 
-The server uses Pydantic for configuration management. Configure via environment variables or `.env` file:
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `LUMENORE_API_KEY` | Yes | - | Bearer token for Lumenore API authentication (JWT format) |
-| `SERVER_URL` | No | `https://preview.lumenore.com` | Lumenore server base URL |
-| `DEBUG` | No | `false` | Enable debug logging |
-
-**Creating .env file**:
-```bash
-# Create .env in project root
-cat > .env << EOF
-LUMENORE_API_KEY=your_jwt_token_here
-SERVER_URL=https://preview.lumenore.com
-DEBUG=false
-EOF
-```
-
-**Token Format**: The API key should be a valid JWT token without the "Bearer " prefix (the server adds this automatically).
 
 ## Error Handling
 
@@ -385,18 +374,6 @@ All tools implement comprehensive error handling with specific error types:
 }
 ```
 
-## Development
-
-### Running in Development Mode
-
-```bash
-# Install development dependencies
-pip install -r requirements.txt
-
-# Run with environment variables
-LUMENORE_API_KEY=your_token python main.py
-```
-
 ### Testing the Server
 
 You can test the MCP server using any MCP-compatible client or by making HTTP requests to the SSE endpoint:
@@ -417,19 +394,19 @@ The Lumenore Analytics MCP Server implements multiple layers of security to prot
 - **In-Memory Processing**: All data is processed in-memory and immediately discarded after response generation
 - **No Data Storage**: The MCP server does not store or log any user queries, schema IDs, or response data
 - **Secure Communication**: All backend API requests use HTTPS encryption
-- **Token Security**: API tokens are never logged, stored, or exposed in responses
+- **Credentials Security**: Client credentials are never logged, stored, or exposed in responses
 
 #### Authentication Security
-- **OAuth 2.0 Bearer Tokens**: Industry-standard authentication using JWT tokens
-- **Token Validation**: Every request validates token authenticity and permissions
+- **Client Credentials Flow**: Industry-standard authentication using client ID and secret
+- **Session Management**: Secure cookie-based session handling with automatic token refresh
 - **No MCP-Level Auth**: MCP connection doesn't require authentication (backend auth is handled server-side)
 - **Security Monitoring**: Failed authentication attempts are logged for security analysis
 
-#### API Token Best Practices
-- **Environment Variables**: Store tokens in environment variables or `.env` files (never in code)
-- **Regular Rotation**: Rotate tokens every 90 days or as needed
-- **Scope Limitation**: Use tokens with minimal required permissions
-- **Separate Environments**: Use different tokens for development, staging, and production
+#### Credentials Best Practices
+- **Environment Variables**: Store credentials in environment variables or `.env` files (never in code)
+- **Regular Rotation**: Rotate credentials every 90 days or as needed
+- **Scope Limitation**: Use credentials with minimal required permissions
+- **Separate Environments**: Use different credentials for development, staging, and production
 
 ### Privacy Policy
 
@@ -470,8 +447,9 @@ User Query → MCP Server → Lumenore Backend → Results → User
 
 #### Environment Security
 ```bash
-# Secure token management
-export LUMENORE_API_KEY="your_secure_token_here"
+# Secure credentials management
+export LUMENORE_CLIENT_ID="your_client_id"
+export LUMENORE_SECRET="your_secret"
 
 # Restrict file permissions
 chmod 600 .env
@@ -482,8 +460,8 @@ chmod 700 /path/to/server/directory
 ```
 
 #### Production Security
-- Use dedicated API tokens for production environments
-- Implement token rotation automation
+- Use dedicated client credentials for production environments
+- Implement credential rotation automation
 - Monitor API usage and set up alerts for unusual activity
 - Consider implementing IP allowlisting for API access
 - Use VPN or private networks for server communication
@@ -517,9 +495,9 @@ We take security seriously. If you find a vulnerability:
 ### Access Control
 
 #### Principle of Least Privilege
-- API tokens should have minimal required permissions
-- Separate tokens for different applications and environments
-- Regular review of token permissions and usage
+- Client credentials should have minimal required permissions
+- Separate credentials for different applications and environments
+- Regular review of credential permissions and usage
 
 #### Network Security
 - Firewall rules restrict access to necessary ports only
@@ -546,9 +524,9 @@ We take security seriously. If you find a vulnerability:
     "server": {
         "lumenore-server": {
             "type": "streamable-http",
-            "url": "https://preview.lumenore.com/api/lumenore-mcp/mcp",
+            "url": "http://localhost:8080/mcp",
             "headers": {
-                "Authorization": "Beare Token"
+                "Authorization": "Bearer Token"
             }
         }
     }
@@ -650,36 +628,9 @@ For technical support and inquiries:
 - **Website**: [https://lumenore.com/](https://lumenore.com/)
 - **Documentation**: [Lumenore Analytics Docs](https://help.lumenore.com/knowledge-base/lumenore_ask_me/)
 
-### Support Channels
-
-**Technical Issues**:
-- Server configuration and setup problems
-- Authentication and authorization errors
-- API integration questions
-- Performance and timeout issues
-
-**Feature Requests**:
-- New analytics capabilities
-- Tool enhancements
-- Integration improvements
-
-**Bug Reports**:
-Please include:
-1. Server version and Python version
-2. Error messages and logs
-3. Steps to reproduce the issue
-4. Expected vs actual behavior
-
-
-### Additional Resources
-
-- **MCP Protocol**: [Model Context Protocol Specification](https://modelcontextprotocol.io/)
-- **FastMCP Documentation**: [FastMCP GitHub](https://github.com/jlowin/fastmcp)
-- **API Reference**: Available through Lumenore support team
-
 ---
 
 **Version**: 1.0.0  
-**Last Updated**: November 2025  
+**Last Updated**: January 2026  
 **Python**: 3.13+  
 **MCP Protocol**: Compatible with MCP 2024-11-05 specification

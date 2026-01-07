@@ -20,7 +20,7 @@ logger = logging.getLogger("config")
 class ConfigModel(BaseSettings):
     SERVER_URL: str = Field(default="https://preview.lumenore.com", alias="SERVER_URL")
 
-    TOKEN: Optional[bool] = Field(default=False, alias="LUMENORE_API_KEY")
+    TOKEN: Optional[str] = Field(default=None, alias="LUMENORE_API_KEY")  # Changed from Optional[bool]
     CLIENT_ID: Optional[str] = Field(default=None, alias="LUMENORE_CLIENT_ID")
     SECRET: Optional[str] = Field(default=None, alias="LUMENORE_SECRET")
 
@@ -48,6 +48,7 @@ class ConfigModel(BaseSettings):
 
 try:
     config = ConfigModel()
+    logger.info(f"Configuration loaded successfully. Using {'API Token' if config.TOKEN else 'Client Credentials (OAuth 2.0)'}")
 except ValidationError as e:
     error = e.errors()
     logger.error(f"Startup Failed: {error[0]['msg']}")

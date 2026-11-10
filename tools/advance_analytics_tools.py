@@ -1,7 +1,8 @@
 import json
 from typing import Annotated
 from pydantic import Field
-from core.lumenore_analytics import get_lumenore_client
+from core.request_context import get_request_headers
+from core.lumenore_analytics import get_lumenore_client, extract_credentials_from_headers
 from utils.logger import get_logger
 from mcp_instance import mcp
 
@@ -44,7 +45,14 @@ async def get_trend_data(
     """
 
     try:
-        client = get_lumenore_client()
+        # Extract credentials from request headers for multi-user support
+        headers = get_request_headers()
+        creds = extract_credentials_from_headers(headers)
+        client = get_lumenore_client(
+            token=creds["token"],
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"]
+        )
 
         result = await client.call_endpoint(
             endpoint_name="get-trend-data",
@@ -130,7 +138,14 @@ async def get_prediction_data(
     and model insights in JSON format.
     """
     try:
-        client = get_lumenore_client()
+        # Extract credentials from request headers for multi-user support
+        headers = get_request_headers()
+        creds = extract_credentials_from_headers(headers)
+        client = get_lumenore_client(
+            token=creds["token"],
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"]
+        )
 
         result = await client.call_endpoint(
             endpoint_name="get-prediction-data",
@@ -219,7 +234,14 @@ async def get_pareto_data(
 
     """
     try:
-        client = get_lumenore_client()
+        # Extract credentials from request headers for multi-user support
+        headers = get_request_headers()
+        creds = extract_credentials_from_headers(headers)
+        client = get_lumenore_client(
+            token=creds["token"],
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"]
+        )
 
         result = await client.call_endpoint(
             endpoint_name="get-pareto-data",
@@ -304,7 +326,14 @@ async def get_outlier_data(
     pattern summaries, and identified unusual data points.
     """
     try:
-        client = get_lumenore_client()
+        # Extract credentials from request headers for multi-user support
+        headers = get_request_headers()
+        creds = extract_credentials_from_headers(headers)
+        client = get_lumenore_client(
+            token=creds["token"],
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"]
+        )
 
         result = await client.call_endpoint(
             endpoint_name="get-outlier-data",
@@ -389,7 +418,14 @@ async def get_correlation_data(
     relationship strengths, dependency mappings, and statistical insights.
     """
     try:
-        client = get_lumenore_client()
+        # Extract credentials from request headers for multi-user support
+        headers = get_request_headers()
+        creds = extract_credentials_from_headers(headers)
+        client = get_lumenore_client(
+            token=creds["token"],
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"]
+        )
 
         result = await client.call_endpoint(
             endpoint_name="get-correlation-data",
@@ -474,7 +510,14 @@ async def get_change_data(
     timeline analysis, and change magnitude assessments.
     """
     try:
-        client = get_lumenore_client()
+        # Extract credentials from request headers for multi-user support
+        headers = get_request_headers()
+        creds = extract_credentials_from_headers(headers)
+        client = get_lumenore_client(
+            token=creds["token"],
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"]
+        )
 
         result = await client.call_endpoint(
             endpoint_name="get-change-data",

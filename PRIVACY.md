@@ -13,6 +13,7 @@ The Lumenore Analytics MCP Server processes the following types of data:
 1. **User Queries**: Natural language questions and requests for data analysis
 2. **Schema IDs**: Numeric identifiers that reference specific datasets in Lumenore
 3. **Tool Parameters**: Input parameters required for analytics tools
+4. **Uploaded Files**: Files a user chooses to upload to Lumenore file storage with the upload tools
 
 ### Data NOT Collected or Stored
 
@@ -49,13 +50,22 @@ User → MCP Server → Lumenore Backend → Analytics Processing → Response �
 - **Transport Security**: All communications use HTTPS/TLS encryption
 - **Token Security**: API tokens are handled securely and never exposed in logs
 - **Memory Management**: Data is securely managed in application memory
-- **No Persistent Storage**: No data is written to disk or databases
+- **No Persistent Storage**: No data is written to databases. Files relayed with `upload_file_from_url` that are larger than `MAX_INLINE_BYTES` are buffered in a temporary file that is deleted as soon as the upload finishes
 
 ### Access Control
 
 - **Minimal Access**: Only necessary data is accessed for processing requests
 - **Token-Based Authentication**: Secure OAuth 2.0 Bearer token authentication
 - **No Unauthorized Access**: Strict controls prevent unauthorized data access
+
+## File Uploads
+
+When a user asks to upload a file, the file is sent to Lumenore file storage (publish-api):
+
+- **Browser upload page**: the file goes directly from the user's browser to a short-lived signed URL. It does not pass through the MCP Server
+- **`upload_file` / chunked uploads**: file content passes through the MCP Server in memory and is forwarded to publish-api
+- **`upload_file_from_url`**: the MCP Server downloads the file from the HTTPS URL provided and forwards it; large files are buffered in a temporary file that is deleted when the upload finishes
+- Uploaded files are stored by Lumenore according to Lumenore's privacy policy
 
 ## Third-Party Data Processing
 

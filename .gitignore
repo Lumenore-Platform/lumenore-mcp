@@ -117,6 +117,10 @@ docker-compose.override.yml
 .local/
 local_settings.py
 *.local
+test_mcp_connection.py
+test_health_endpoints.py
+validate_async.py
+a.temp
 
 # Coverage and profiling
 .coverage.*

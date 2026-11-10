@@ -1,3 +1,5 @@
+# Copyright © Lumenore Inc. All rights reserved.
+
 import requests
 
 from exceptions.exceptions import AuthenticationError
@@ -39,7 +41,7 @@ class LumenoreAuthClient:
         self.token_expiry: Optional[float] = None
         self.tokenmd5: Optional[str] = None
 
-        logger.info(f"Initialized LumenoreAuthClient for {self.base_url}")
+        logger.debug("[OAuth] Initialized LumenoreAuthClient: base_url=%s", self.base_url)
 
     def authenticate(self) -> bool:
         """
@@ -54,7 +56,6 @@ class LumenoreAuthClient:
         url = f"{self.base_url}/api/secure/client/user-login"
         payload = {"data": {"clientId": self.client_id, "secret": self.secret}}
 
-        logger.debug(f"Authenticating to {url}")
 
         try:
             response = self.session.post(
@@ -64,26 +65,27 @@ class LumenoreAuthClient:
                 timeout=30,
             )
 
-            logger.debug(f"Authentication response status: {response.status_code}")
+            logger.debug("[OAuth] Login response received: status=%s", response.status_code)
 
             if response.status_code == 200:
-                self.access_token = "Bearer " + response.cookies.get("access_token")
+                access_token = response.cookies.get("access_token")
+                self.access_token = f"Bearer {access_token}" if access_token else None
 
                 if self.access_token:
-                    logger.info("Authentication successful")
+                    logger.debug("[OAuth] Authentication successful")
                     return self.access_token
                 else:
+                    logger.error(
+                        "[OAuth] Authentication response did not include an access_token cookie"
+                    )
                     raise AuthenticationError("No access_token in response cookies")
 
             else:
+                # Do not echo the response body: it may contain sensitive details.
                 error_msg = f"Authentication failed with status {response.status_code}"
-                try:
-                    error_data = response.json()
-                    error_msg += f": {error_data}"
-                except:
-                    error_msg += f": {response.text}"
-
+                logger.error("[OAuth] %s", error_msg)
                 raise AuthenticationError(error_msg)
 
         except requests.RequestException as e:
-            raise AuthenticationError(f"Network error during authentication: {e}")
+            logger.error("[OAuth] Network error during authentication: %s", type(e).__name__)
+            raise AuthenticationError("Network error during authentication") from None

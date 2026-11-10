@@ -2,7 +2,8 @@ import json
 from typing import Annotated
 from mcp_instance import mcp
 from pydantic import Field
-from core.lumenore_analytics import get_lumenore_client
+from core.request_context import get_request_headers
+from core.lumenore_analytics import get_lumenore_client, extract_credentials_from_headers
 
 
 @mcp.tool(
@@ -40,7 +41,14 @@ async def nlq_to_data(
     Returns structured data with analysis results including headers and data rows.
     """
     try:
-        client = get_lumenore_client()
+        # Extract credentials from request headers for multi-user support
+        headers = get_request_headers()
+        creds = extract_credentials_from_headers(headers)
+        client = get_lumenore_client(
+            token=creds["token"],
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"]
+        )
 
         result = await client.call_endpoint(
             endpoint_name="nlq-to-data",

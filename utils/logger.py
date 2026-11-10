@@ -1,14 +1,19 @@
 import logging
-import sys
+import logging.handlers
 import os
+import sys
 from typing import Optional
 
-# Import config lazily to allow config to initialize without circular import issues.
-# config imports logging only (not this module), so import here is safe at runtime.
-from config import config  # noqa: E402
+from config import config
+
 
 class LoggerManager:
-    """Centralized logging manager for the application."""
+    """Centralized logging manager for the application.
+
+    Logs go to stderr only (stdout is reserved for the MCP protocol). Set
+    LOG_FILE to also write a rotating log file. Never log credentials,
+    request headers, queries or response bodies.
+    """
 
     _instance: Optional["LoggerManager"] = None
     _logger: Optional[logging.Logger] = None
@@ -26,12 +31,8 @@ class LoggerManager:
     def _setup_logger(self):
         self._logger = logging.getLogger("lumenore_analytics")
 
-        # If debug mode, enable debug; otherwise keep logger silent (as before)
-        if getattr(config, "DEBUG", False):
-            self._logger.setLevel(logging.DEBUG)
-        else:
-            # Highest possible threshold – effectively disables logging for this logger
-            self._logger.setLevel(logging.CRITICAL + 1)
+        log_level = logging.DEBUG if getattr(config, "DEBUG", False) else logging.INFO
+        self._logger.setLevel(log_level)
 
         # Avoid re-adding handlers on re-imports/re-instantiation
         if self._logger.handlers:
@@ -42,35 +43,24 @@ class LoggerManager:
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 
-        # IMPORTANT: Write console logs to STDERR so stdout remains reserved for protocol/json
         console_handler = logging.StreamHandler(sys.stderr)
-        if getattr(config, "DEBUG", False):
-            console_handler.setLevel(logging.DEBUG)
-        else:
-            console_handler.setLevel(logging.CRITICAL + 1)
+        console_handler.setLevel(log_level)
         console_handler.setFormatter(formatter)
-
-        BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        LOG_DIR = os.path.join(BASE_DIR, ".logs")
-        os.makedirs(LOG_DIR, exist_ok=True)
-
-        log_file_path = os.path.join(LOG_DIR, "lumenore_analytics.log")
-        file_handler = logging.FileHandler(log_file_path)
-        if getattr(config, "DEBUG", False):
-            file_handler.setLevel(logging.INFO)
-        else:
-            file_handler.setLevel(logging.CRITICAL + 1)
-        file_handler.setFormatter(formatter)
-
         self._logger.addHandler(console_handler)
-        self._logger.addHandler(file_handler)
+
+        log_file = os.getenv("LOG_FILE", "").strip()
+        if log_file:
+            os.makedirs(os.path.dirname(os.path.abspath(log_file)), exist_ok=True)
+            file_handler = logging.handlers.RotatingFileHandler(
+                log_file, maxBytes=10 * 1024 * 1024, backupCount=3
+            )
+            file_handler.setLevel(log_level)
+            file_handler.setFormatter(formatter)
+            self._logger.addHandler(file_handler)
 
         # Prevent logs from propagating to root (avoid duplicates)
         self._logger.propagate = False
-
-        # Startup info (goes to stderr/file)
-        self._logger.info("Logger initialized")
-        self._logger.info(f"Debug mode: {getattr(config, 'DEBUG', False)}")
+        self._logger.info("Logger initialized (level=%s)", logging.getLevelName(log_level))
 
     def get_logger(self, name: Optional[str] = None) -> logging.Logger:
         if self._logger is None:
@@ -80,26 +70,6 @@ class LoggerManager:
             return logging.getLogger(f"lumenore_analytics.{name}")
         return self._logger
 
-    def debug(self, message: str, name: Optional[str] = None):
-        logger = self.get_logger(name)
-        logger.debug(message)
-
-    def info(self, message: str, name: Optional[str] = None):
-        logger = self.get_logger(name)
-        logger.info(message)
-
-    def warning(self, message: str, name: Optional[str] = None):
-        logger = self.get_logger(name)
-        logger.warning(message)
-
-    def error(self, message: str, name: Optional[str] = None):
-        logger = self.get_logger(name)
-        logger.error(message)
-
-    def critical(self, message: str, name: Optional[str] = None):
-        logger = self.get_logger(name)
-        logger.critical(message)
-
 
 # Global logger instance
 logger_manager = LoggerManager()
@@ -107,23 +77,3 @@ logger_manager = LoggerManager()
 
 def get_logger(name: Optional[str] = None) -> logging.Logger:
     return logger_manager.get_logger(name)
-
-
-def debug(message: str, name: Optional[str] = None):
-    logger_manager.debug(message, name)
-
-
-def info(message: str, name: Optional[str] = None):
-    logger_manager.info(message, name)
-
-
-def warning(message: str, name: Optional[str] = None):
-    logger_manager.warning(message, name)
-
-
-def error(message: str, name: Optional[str] = None):
-    logger_manager.error(message, name)
-
-
-def critical(message: str, name: Optional[str] = None):
-    logger_manager.critical(message, name)

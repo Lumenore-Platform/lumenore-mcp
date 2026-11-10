@@ -2,7 +2,8 @@ import json
 from mcp_instance import mcp
 from typing import Annotated
 from pydantic import Field
-from core.lumenore_analytics import get_lumenore_client
+from core.request_context import get_request_headers
+from core.lumenore_analytics import get_lumenore_client, extract_credentials_from_headers
 
 
 @mcp.tool(
@@ -24,7 +25,15 @@ async def get_dataset_metadata():
     in MCP-compliant format.
     """
     try:
-        client = get_lumenore_client()
+        # Extract credentials from request headers for multi-user support
+        headers = get_request_headers()
+        creds = extract_credentials_from_headers(headers)
+        client = get_lumenore_client(
+            token=creds["token"],
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"]
+        )
+
         response = await client.call_endpoint(
             endpoint_name="get-domain",
             method="GET"
@@ -104,14 +113,20 @@ async def get_metadata_info(
     ]
 
     try:
-        client = get_lumenore_client()
+        # Extract credentials from request headers for multi-user support
+        headers = get_request_headers()
+        creds = extract_credentials_from_headers(headers)
+        client = get_lumenore_client(
+            token=creds["token"],
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"]
+        )
+
         response = await client.call_endpoint(
             endpoint_name=f"metadata/get/{schemaId}",
             method="POST",
-            data={
-                "columns": columns,
-                "domainId": schemaId,
-            }
+            columns=columns,
+            domainId=schemaId,
         )
 
         datasets = response.get("data", {})
@@ -120,12 +135,13 @@ async def get_metadata_info(
             "content": [
                 {
                     "type": "text",
-                    "text": {
-                        "columns": columns,
-                        "data": json.dumps(
-                            datasets.get("result", {}).get("resultSet", {}), indent=2
-                        ),
-                    },
+                    "text": json.dumps(
+                        {
+                            "columns": columns,
+                            "data": datasets.get("result", {}).get("resultSet", {}),
+                        },
+                        indent=2,
+                    ),
                 }
             ]
         }

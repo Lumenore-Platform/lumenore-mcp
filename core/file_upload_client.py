@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -15,6 +16,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import httpx
 
 from config import config
+from core.request_context import client_credentials, is_bearer
 from utils.logger import get_logger
 
 logger = get_logger("file_upload")
@@ -119,25 +121,36 @@ class _UploadUrlCache:
 _url_cache = _UploadUrlCache()
 
 
-def bearer_for_request(headers: dict[str, str]) -> str:
+def _as_bearer(token: str) -> str:
+    token = token.strip()
+    return token if token.lower().startswith("bearer ") else f"Bearer {token}"
+
+
+async def bearer_for_request(headers: dict[str, str]) -> str:
     """Resolve a bearer token for publish-api uploads.
 
-    MCP clients may authenticate with either a bearer token or Lumenore client
-    credentials. Analytics tools exchange the latter for a bearer token before
-    calling Lumenore; uploads must do the same because publish-api requires a
-    bearer token for creating upload sessions.
-    """
-    auth = (headers or {}).get("authorization", "").strip()
-    if auth.lower().startswith("bearer ") and auth[7:].strip():
-        return auth
+    Order: the request's own Bearer token, then the request's Lumenore client
+    credentials (exchanged for a bearer), then the server-level token.
 
-    client_id = (headers or {}).get("lumenore-client-id") or (headers or {}).get(
-        "x-lumenore-client-id"
-    )
-    client_secret = (headers or {}).get("lumenore-client-secret") or (headers or {}).get(
-        "x-lumenore-client-secret"
-    )
-    if client_id and client_secret:
+    The server-level token is used only when the request carries no credentials
+    at all. A request that presents credentials which are unusable (a non-Bearer
+    Authorization header, or half a client-credential pair) is rejected instead
+    of being silently upgraded to the server account.
+    """
+    headers = headers or {}
+    auth = (headers.get("authorization") or "").strip()
+    if auth:
+        if is_bearer(auth):
+            return auth
+        raise ToolError("401 Unauthorized: the Authorization header must be a Bearer token.")
+
+    client_id, client_secret = client_credentials(headers)
+    if client_id or client_secret:
+        if not (client_id and client_secret):
+            raise ToolError(
+                "401 Unauthorized: both Lumenore-Client-Id and "
+                "Lumenore-Client-Secret headers are required."
+            )
         from core.lumenore_client import LumenoreAuthClient
 
         auth_client = LumenoreAuthClient(
@@ -145,14 +158,16 @@ def bearer_for_request(headers: dict[str, str]) -> str:
             secret=client_secret,
             base_url=config.SERVER_URL,
         )
-        return auth_client.authenticate()
+        try:
+            # authenticate() uses blocking `requests`; keep it off the event loop.
+            return await asyncio.to_thread(auth_client.authenticate)
+        except Exception as exc:
+            raise ToolError(f"401 Unauthorized: Lumenore login failed ({exc})") from None
 
-    if config.PUBLISH_API_TOKEN:
-        token = config.PUBLISH_API_TOKEN.strip()
-        return token if token.lower().startswith("bearer ") else f"Bearer {token}"
-    if config.TOKEN:
-        token = config.TOKEN.strip()
-        return token if token.lower().startswith("bearer ") else f"Bearer {token}"
+    if config.PUBLISH_API_TOKEN and config.PUBLISH_API_TOKEN.strip():
+        return _as_bearer(config.PUBLISH_API_TOKEN)
+    if config.TOKEN and config.TOKEN.strip():
+        return _as_bearer(config.TOKEN)
     raise ToolError(
         "No bearer token is available for publish-api. Reconnect the MCP client "
         "or configure PUBLISH_API_TOKEN for a server-level integration."
@@ -218,6 +233,26 @@ class FileUploadClient:
         if not isinstance(data, dict):
             raise ToolError("publish-api response did not contain a data object")
         return data
+
+    async def verify_bearer(self) -> None:
+        """Make one cheap authenticated call so costly work never starts for a bad token.
+
+        publish-api authenticates before it looks the session up, so a random
+        session id returns 404 for a valid bearer and 401 for an invalid one.
+        Anything else fails closed.
+        """
+        url = f"{self._sessions_url}/{uuid.uuid4()}"
+        try:
+            response = await self._http.get(url, headers={"Authorization": self.bearer})
+        except httpx.HTTPError as exc:
+            raise ToolError(f"publish-api network error: {type(exc).__name__}") from None
+        if response.status_code == 404 or 200 <= response.status_code < 300:
+            return
+        if response.status_code in (401, 403):
+            raise ToolError("401 Unauthorized: publish-api rejected the bearer token.")
+        raise ToolError(
+            f"publish-api credential check failed with HTTP {response.status_code}"
+        )
 
     async def create_session(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._data(await self._api_request("POST", self._sessions_url, json_body=payload))

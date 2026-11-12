@@ -1,7 +1,12 @@
 from config import config
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.exceptions import ValidationError
-from core.request_context import set_request_headers, clear_request_headers
+from core.request_context import (
+    set_request_headers,
+    clear_request_headers,
+    is_bearer,
+    client_credentials,
+)
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -54,18 +59,17 @@ class RawMiddleware(Middleware):
 
         # Check for credentials in request headers. Accept both the plain and
         # the X- prefixed client-credential header names.
-        auth_header = headers.get("authorization") if headers else None
-        client_id = (
-            headers.get("lumenore-client-id") or headers.get("x-lumenore-client-id")
-            if headers
-            else None
-        )
-        client_secret = (
-            headers.get("lumenore-client-secret")
-            or headers.get("x-lumenore-client-secret")
-            if headers
-            else None
-        )
+        auth_header = (headers.get("authorization") or "").strip()
+        client_id, client_secret = client_credentials(headers)
+
+        # An Authorization header must be a Bearer token. Anything else is
+        # rejected outright so it can never fall through to server-level
+        # credentials.
+        if auth_header and not is_bearer(auth_header):
+            clear_request_headers()
+            raise ValidationError(
+                "401 Unauthorized: the Authorization header must be a Bearer token."
+            )
 
         # Determine if we have valid credentials from any source
         has_header_token = bool(auth_header)

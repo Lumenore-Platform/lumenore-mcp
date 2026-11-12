@@ -4,6 +4,7 @@ import logging
 import json
 import base64
 import hashlib
+import ipaddress
 from urllib.parse import parse_qs, urlsplit
 
 import tools
@@ -11,6 +12,7 @@ import asyncio
 from mcp_instance import mcp
 from utils.logger import get_logger
 from config import config
+from core.request_context import client_credentials, is_bearer
 
 # Suppress all deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -51,8 +53,12 @@ progress{width:100%;margin-top:20px}#status{margin-top:14px;white-space:pre-wrap
 '''
 
 UPLOAD_PAGE_SCRIPT = r'''
-(()=>{const q=new URLSearchParams(location.search), put=q.get('put'), complete=q.get('complete'), name=q.get('name'), type=q.get('type')||'application/octet-stream', expected=Number(q.get('size')||0), picker=document.getElementById('picker'), drop=document.getElementById('drop'), button=document.getElementById('upload'), progress=document.getElementById('progress'), status=document.getElementById('status');
-document.getElementById('details').textContent=`Choose ${name||'the file'} (${expected.toLocaleString()} bytes).`;
+(()=>{const q=new URLSearchParams(location.hash.slice(1)), put=q.get('put'), complete=q.get('complete'), name=q.get('name'), type=q.get('type')||'application/octet-stream', expected=Number(q.get('size')||0), picker=document.getElementById('picker'), drop=document.getElementById('drop'), button=document.getElementById('upload'), progress=document.getElementById('progress'), status=document.getElementById('status'), details=document.getElementById('details');
+try{history.replaceState(null,'',location.pathname)}catch(e){}
+addEventListener('hashchange',()=>location.reload());
+const https=u=>{try{return new URL(u).protocol==='https:'}catch(e){return false}};
+if(!https(put)||!https(complete)||!(expected>0)){details.textContent='This upload link is incomplete or was already used in this tab. Return to Claude and open the upload link again, or ask for a new one.';drop.hidden=true;button.hidden=true;return}
+details.textContent=`Choose ${name||'the file'} (${expected.toLocaleString()} bytes).`;
 const choose=()=>picker.click(); drop.onclick=choose; drop.onkeydown=e=>{if(e.key==='Enter'||e.key===' ')choose()}; drop.ondragover=e=>{e.preventDefault();drop.classList.add('drag')}; drop.ondragleave=()=>drop.classList.remove('drag'); drop.ondrop=e=>{e.preventDefault();drop.classList.remove('drag');picker.files=e.dataTransfer.files;picker.dispatchEvent(new Event('change'))};
 picker.onchange=()=>{const f=picker.files[0]; const valid=f&&(!expected||f.size===expected); button.disabled=!valid; status.className=valid?'':'err'; status.textContent=f&&!valid?`Choose a file with the expected size (${expected.toLocaleString()} bytes). Selected file: ${f.size.toLocaleString()} bytes.`:''};
 button.onclick=()=>{const f=picker.files[0];button.disabled=true;progress.hidden=false;status.className='';status.textContent='Uploading...';const xhr=new XMLHttpRequest();xhr.open('PUT',put);xhr.setRequestHeader('Content-Type',type);xhr.upload.onprogress=e=>{if(e.lengthComputable){progress.value=e.loaded/e.total*100;status.textContent=`Uploading ${Math.round(progress.value)}%`}};xhr.onerror=()=>{status.className='err';status.textContent='Upload failed. You can retry this page.';button.disabled=false};xhr.onload=async()=>{if(xhr.status<200||xhr.status>=300){status.className='err';status.textContent=`Upload failed (HTTP ${xhr.status}).`;button.disabled=false;return}status.textContent='File received. Finalizing in Lumenore...';try{const done=await fetch(complete,{method:'POST'});if(!done.ok)throw new Error(`HTTP ${done.status}`);status.className='ok';status.textContent='Upload complete. You can close this page.';progress.value=100}catch(e){status.className='err';status.textContent='File bytes uploaded, but completion failed: '+e.message+'. Return to Claude to retry completion.';button.disabled=false}};xhr.send(f)};
@@ -71,13 +77,32 @@ def _csp_hash(source):
     return "'sha256-" + base64.b64encode(digest).decode("ascii") + "'"
 
 
-def _upload_page_headers(connect_origins):
-    """Strict headers: inline code pinned by hash, no framing, no referrer (signed URLs are in the query)."""
+def _upload_connect_sources():
+    """CSP connect-src entries for UPLOAD_PAGE_ALLOWED_HOSTS (subdomains and any port match)."""
+    sources = []
+    for host in sorted(config.upload_page_allowed_hosts):
+        if not host or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789.-" for ch in host):
+            continue
+        sources.append(f"https://{host}:*")
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            sources.append(f"https://*.{host}:*")
+    return sources or ["'none'"]
+
+
+def _upload_page_headers():
+    """Strict headers: inline code pinned by hash, no framing, no referrer.
+
+    The signed URLs live in the URL fragment, which the browser never sends
+    here, so the page cannot be validated per request. connect-src is built
+    from the configured allowlist instead and the browser enforces it.
+    """
     csp = (
         "default-src 'none'; "
         f"script-src {_csp_hash(UPLOAD_PAGE_SCRIPT)}; "
         f"style-src {_csp_hash(UPLOAD_PAGE_STYLE)}; "
-        f"connect-src {' '.join(sorted(connect_origins))}; "
+        f"connect-src {' '.join(_upload_connect_sources())}; "
         "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     )
     return [
@@ -111,6 +136,45 @@ def _asgi_json_response(status_code, payload, headers=None):
             for name, value in headers.items()
         )
     return status_code, response_headers, body
+
+
+def _header_hostname(value):
+    """Hostname (no port, lower-case) from a Host header or URL authority."""
+    try:
+        return (urlsplit("//" + value.strip()).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
+
+
+def _host_origin_rejection(headers):
+    """Return a reason when Host/Origin are not allowlisted, else None.
+
+    Used in server-credential mode, where /mcp needs no token and every call
+    runs as the service account: without this a web page could reach a
+    localhost or internal deployment through DNS rebinding.
+    """
+    allowed_hosts = config.allowed_hosts
+    if "*" not in allowed_hosts:
+        host = _header_hostname(headers.get("host", ""))
+        if not host or host not in allowed_hosts:
+            return "Host header is not allowed"
+    origin = headers.get("origin")
+    if origin is not None:
+        allowed_origins = config.allowed_origins
+        if "*" in allowed_origins:
+            return None
+        origin = origin.strip().lower().rstrip("/")
+        if origin in allowed_origins:
+            return None
+        try:
+            parts = urlsplit(origin)
+            origin_host = (parts.hostname or "").rstrip(".")
+        except ValueError:
+            return "Origin header is not allowed"
+        if (parts.scheme not in ("http", "https") or not origin_host
+                or ("*" not in allowed_hosts and origin_host not in allowed_hosts)):
+            return "Origin header is not allowed"
+    return None
 
 
 def _metadata_url():
@@ -164,18 +228,14 @@ def create_smart_router(mcp_app):
                     return await response(scope, receive, send)
 
             if sub_path == "/upload" and scope["method"] == "GET":
-                query = parse_qs(scope.get("query_string", b"").decode("utf-8"), keep_blank_values=False)
-                required = ("put", "complete", "name", "type", "size")
-                put_url = query.get("put", [""])[0]
-                complete_url = query.get("complete", [""])[0]
-                size = query.get("size", [""])[0]
-                if (any(not query.get(key, [""])[0] for key in required)
-                        or not _signed_url_allowed(put_url)
-                        or not _signed_url_allowed(complete_url)
-                        or not size.isdigit() or int(size) <= 0
-                        or int(size) > config.MAX_TOTAL_BYTES):
+                # The signed URLs belong in the fragment (#put=...), which never
+                # reaches this server or its logs. Refuse the old query form so
+                # nothing keeps sending live signatures in the request line.
+                query = parse_qs(scope.get("query_string", b"").decode("utf-8", "replace"))
+                if "put" in query or "complete" in query:
                     status, response_headers, response_body = _asgi_json_response(
-                        400, {"error": "upload page requires a valid signed upload session"}
+                        400, {"error": "signed upload URLs must be passed in the URL "
+                                       "fragment; request a new upload link"}
                     )
                     await send({"type": "http.response.start", "status": status, "headers": response_headers})
                     await send({"type": "http.response.body", "body": response_body})
@@ -188,10 +248,7 @@ def create_smart_router(mcp_app):
                         (b"content-type", b"text/html; charset=utf-8"),
                         (b"content-length", str(len(body)).encode("ascii")),
                         (b"cache-control", b"no-store"),
-                        *_upload_page_headers({
-                            f"https://{urlsplit(put_url).netloc}",
-                            f"https://{urlsplit(complete_url).netloc}",
-                        }),
+                        *_upload_page_headers(),
                     ],
                 })
                 await send({"type": "http.response.body", "body": body})
@@ -228,7 +285,29 @@ def create_smart_router(mcp_app):
                     key.decode("latin-1").lower(): value.decode("latin-1")
                     for key, value in scope.get("headers", [])
                 }
-                if not headers.get("authorization") and not config.has_credentials():
+                server_mode = config.has_credentials()
+                if server_mode:
+                    rejection = _host_origin_rejection(headers)
+                    if rejection:
+                        status, response_headers, body = _asgi_json_response(
+                            403, {"error": "forbidden", "error_description": rejection}
+                        )
+                        await send({
+                            "type": "http.response.start",
+                            "status": status,
+                            "headers": response_headers,
+                        })
+                        await send({"type": "http.response.body", "body": body})
+                        return
+                authorization = headers.get("authorization", "").strip()
+                client_id, client_secret = client_credentials(headers)
+                # A present Authorization header must be a Bearer token; it is
+                # never allowed to fall through to server-level credentials.
+                if authorization:
+                    authenticated = is_bearer(authorization)
+                else:
+                    authenticated = bool(client_id and client_secret) or server_mode
+                if not authenticated:
                     metadata_url = _metadata_url()
                     status, response_headers, body = _asgi_json_response(
                         401,

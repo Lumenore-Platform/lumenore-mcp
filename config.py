@@ -65,6 +65,20 @@ class ConfigModel(BaseSettings):
     # Optional allowlist for upload_file_from_url source hosts (comma-separated;
     # subdomains match). Empty allows any public HTTPS host.
     ALLOWED_SOURCE_URL_HOSTS: str = Field(default="", alias="ALLOWED_SOURCE_URL_HOSTS")
+    # upload_file_from_url limits: simultaneous server-side downloads, and the
+    # total time one download (DNS + connect + body) may take.
+    UPLOAD_FROM_URL_MAX_CONCURRENCY: int = Field(
+        default=2, alias="UPLOAD_FROM_URL_MAX_CONCURRENCY", gt=0
+    )
+    UPLOAD_FROM_URL_TIMEOUT_SECONDS: int = Field(
+        default=300, alias="UPLOAD_FROM_URL_TIMEOUT_SECONDS", gt=0
+    )
+
+    # Server-credential mode only: Host / Origin values accepted on /mcp
+    # (comma-separated). Loopback names and the MCP_RESOURCE_URL host are always
+    # accepted; "*" disables the check. Guards against DNS rebinding.
+    ALLOWED_HOSTS: str = Field(default="", alias="ALLOWED_HOSTS")
+    ALLOWED_ORIGINS: str = Field(default="", alias="ALLOWED_ORIGINS")
 
     DEBUG: bool = Field(default=False, alias="DEBUG")
 
@@ -77,7 +91,10 @@ class ConfigModel(BaseSettings):
             and self.CLIENT_ID.strip()
             and self.SECRET.strip()
         )
-        return bool(token_provided or client_credentials_provided)
+        publish_token_provided = self.PUBLISH_API_TOKEN and self.PUBLISH_API_TOKEN.strip()
+        return bool(
+            token_provided or client_credentials_provided or publish_token_provided
+        )
 
     @property
     def mcp_scopes(self):
@@ -120,6 +137,26 @@ class ConfigModel(BaseSettings):
         return self._host_list(self.ALLOWED_SOURCE_URL_HOSTS)
 
     @property
+    def allowed_hosts(self):
+        """Host header values (hostnames, no port) accepted in server-credential mode."""
+        from urllib.parse import urlsplit
+
+        hosts = {"localhost", "127.0.0.1", "::1"} | self._host_list(self.ALLOWED_HOSTS)
+        resource_host = urlsplit(self.MCP_RESOURCE_URL).hostname
+        if resource_host:
+            hosts.add(resource_host.lower().rstrip("."))
+        return hosts
+
+    @property
+    def allowed_origins(self):
+        """Extra Origin values (scheme://host[:port]) accepted in server-credential mode."""
+        return {
+            item.strip().lower().rstrip("/")
+            for item in self.ALLOWED_ORIGINS.split(",")
+            if item.strip()
+        }
+
+    @property
     def allowed_extensions(self):
         return {
             item.strip().lower().lstrip(".")
@@ -135,7 +172,9 @@ try:
             "Server-level credentials are configured. Requests without their own "
             "credentials will run as this account, and /mcp will not require "
             "OAuth. Do not use server-level credentials on a publicly reachable "
-            "deployment."
+            "deployment. /mcp only accepts these Host values in this mode: %s "
+            "(set ALLOWED_HOSTS / ALLOWED_ORIGINS to change).",
+            ", ".join(sorted(config.allowed_hosts)),
         )
     else:
         logger.info(

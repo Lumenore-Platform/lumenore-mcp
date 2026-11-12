@@ -110,16 +110,29 @@ Settings are read from environment variables or a `.env` file (Pydantic settings
 
 Leave these empty for multi-tenant deployments. Every request must then bring its own credentials, and unauthenticated `/mcp` calls get the OAuth `401` challenge.
 
+`PUBLISH_API_TOKEN` (below) also counts as a server-level credential.
+
+When any server-level credential is set, `/mcp` needs no token, so the server validates `Host` and `Origin` to block DNS rebinding from a browser:
+
+| Variable | Default | Description |
+|---|---|---|
+| `ALLOWED_HOSTS` | – | Extra comma-separated hostnames accepted in the `Host` header (ports are ignored). `localhost`, `127.0.0.1`, `::1` and the `MCP_RESOURCE_URL` host are always accepted. `*` disables the check |
+| `ALLOWED_ORIGINS` | – | Extra comma-separated origins (`https://app.example.com`) accepted in the `Origin` header. Origins whose host is an allowed host are always accepted, as are requests without `Origin`. `*` disables the check |
+
+Other requests to `/mcp` get `403`. If the server runs behind a proxy or a container service name, add that hostname to `ALLOWED_HOSTS`.
+
 ### File uploads
 
 | Variable | Default | Description |
 |---|---|---|
 | `PUBLISH_API_BASE_URL` | `{SERVER_URL}/api/publish` | Base URL for upload session management |
 | `PUBLISH_API_SESSIONS_PATH` | `/signed/sessions` | Sessions path below `PUBLISH_API_BASE_URL` |
-| `PUBLISH_API_TOKEN` | – | Optional server-level bearer for publish-api; used only when the request has no bearer or client credentials |
+| `PUBLISH_API_TOKEN` | – | Optional server-level bearer for publish-api; used only when the request carries no credentials at all. Counts as a server-level credential |
 | `UPLOAD_PAGE_BASE_URL` | derived | Public URL of the browser upload page, e.g. `https://your-lumenore-host.example.com/bridge/lumenore-mcp/upload`. Defaults to `MCP_RESOURCE_URL` with `/mcp` replaced by `/upload` |
 | `UPLOAD_PAGE_ALLOWED_HOSTS` | `PUBLISH_API_BASE_URL` host | Comma-separated hosts (subdomains match) the browser upload page may send files to. Set it if publish-api returns signed URLs on another host |
 | `ALLOWED_SOURCE_URL_HOSTS` | – | Optional comma-separated allowlist for `upload_file_from_url`. Empty allows any public HTTPS host |
+| `UPLOAD_FROM_URL_MAX_CONCURRENCY` | `2` | Max simultaneous `upload_file_from_url` downloads; further calls are refused until one finishes |
+| `UPLOAD_FROM_URL_TIMEOUT_SECONDS` | `300` | Total time one `upload_file_from_url` download may take |
 | `MAX_INLINE_BYTES` | `102400` | Max size for `upload_file` (100 KiB) |
 | `MAX_CHUNK_BYTES` | `30000` | Max raw bytes per chunk |
 | `MAX_TOTAL_BYTES` | `104857600` | Max file size (100 MiB) |
@@ -198,7 +211,8 @@ MCP server ──► Lumenore APIs with the same Authorization header
 
 - The server does not issue or validate tokens itself. It advertises the IDP, and the Lumenore backend validates the forwarded bearer.
 - The gateway may exchange the MCP token and forward an IDP-issued bearer. The engine uses whatever `Authorization` header reaches it.
-- The `401` challenge is only returned when the request has no `Authorization` header **and** no server-level credentials are configured.
+- The `401` challenge is returned when the request has no `Authorization: Bearer` header, no client-credential headers, and no server-level credentials are configured.
+- An `Authorization` header that is not `Bearer <token>` is always rejected with `401`. It never falls back to client-credential headers or server-level credentials.
 
 ### Credential sources (priority order)
 
@@ -209,7 +223,7 @@ MCP server ──► Lumenore APIs with the same Authorization header
 
 Tokens obtained through client-credential login are refreshed once automatically on a `401` from the backend. Tool calls with no usable credentials fail with `401 Unauthorized: No credentials provided`.
 
-For uploads, publish-api requires a bearer: the request bearer is used first, then client-credential headers (exchanged for a bearer), then `PUBLISH_API_TOKEN`, then `LUMENORE_API_KEY`.
+For uploads, publish-api requires a bearer: the request bearer is used first, then client-credential headers (exchanged for a bearer). Only when the request carries no credentials at all is `PUBLISH_API_TOKEN` used, then `LUMENORE_API_KEY`.
 
 ### Security best practices
 
@@ -341,14 +355,14 @@ The server's MCP instructions tell assistants to upload the **complete** file (n
 
 ### Browser upload page
 
-`create_upload_link` creates a DIRECT session and returns `upload_page_url`, which points at `GET {UPLOAD_PAGE_BASE_URL}?put=…&complete=…&name=…&type=…&size=…`. The page:
+`create_upload_link` creates a DIRECT session and returns `upload_page_url`, which points at `{UPLOAD_PAGE_BASE_URL}#put=…&complete=…&name=…&type=…&size=…`. The signed URLs are in the URL fragment, which browsers never send to a server, so they do not appear in access logs, gateway logs or `Referer` headers; the page also removes the fragment from the address bar once it has read it. The page:
 
-- only accepts HTTPS `put` and `complete` URLs on `UPLOAD_PAGE_ALLOWED_HOSTS` and a size up to `MAX_TOTAL_BYTES`, and returns `400` otherwise, so the page cannot be used to send files to another site
+- can only connect to HTTPS hosts in `UPLOAD_PAGE_ALLOWED_HOSTS` (enforced by the browser through `connect-src`), so it cannot be used to send files to another site. `create_upload_link` also refuses signed URLs on other hosts. Requests that put the signed URLs in the query string get `400`
 - lets the user pick or drop the file and checks that its size matches (the file name may differ)
 - `PUT`s the bytes to the signed URL with progress, then `POST`s the signed completion URL
-- is served with a strict Content-Security-Policy (inline code pinned by hash, `connect-src` limited to the signed-URL hosts, no framing), `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` and `noindex`
+- is served with a strict Content-Security-Policy (inline code pinned by hash, `connect-src` built from `UPLOAD_PAGE_ALLOWED_HOSTS`, no framing), `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` and `noindex`
 
-A `curl` command is also returned as a technical fallback.
+A `curl` command is also returned as a technical fallback. `content_type` must be a plain media type (`type/subtype`) and every value in the command is shell-quoted.
 
 ### Protocol details
 
@@ -357,7 +371,7 @@ A `curl` command is also returned as a technical fallback.
 - `{chunkNumber}` in the template is replaced with the URL-quoted, zero-based chunk number.
 - SHA-256 is sent as lowercase hex; callers may supply it for chunked sessions.
 - Retries on `429/500/502/503/504`. Expired signed URLs (`401/403/404/410`) are refreshed once, then the upload fails with a clear error.
-- `upload_file_from_url` accepts only HTTPS URLs without embedded credentials that resolve to public internet addresses (loopback, private, link-local/cloud-metadata and other internal ranges are rejected, and the connected address is re-checked). It sends no credentials to the source, does not follow redirects, streams in `MAX_CHUNK_BYTES` pieces, and enforces `MAX_TOTAL_BYTES`. Use `ALLOWED_SOURCE_URL_HOSTS` to restrict it further.
+- `upload_file_from_url` first verifies the caller's bearer with publish-api, and only then resolves or downloads anything. Downloads are limited by `UPLOAD_FROM_URL_MAX_CONCURRENCY` and `UPLOAD_FROM_URL_TIMEOUT_SECONDS`. It accepts only HTTPS URLs without embedded credentials that resolve to public internet addresses (loopback, private, link-local/cloud-metadata and other internal ranges are rejected, and the connected address is re-checked). It sends no credentials to the source, does not follow redirects, streams in `MAX_CHUNK_BYTES` pieces, and enforces `MAX_TOTAL_BYTES`. Use `ALLOWED_SOURCE_URL_HOSTS` to restrict it further.
 - File names are sanitized to a safe basename and checked against `ALLOWED_EXTENSIONS`.
 
 Expected publish-api responses: session create `201`; direct PUT `202` with `data.status=UPLOADED`; chunk PUT `200` (duplicate) or `202`; complete `200`/`201` with `data.uniqueFileName`.

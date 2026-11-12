@@ -6,6 +6,8 @@ import asyncio
 import hashlib
 import ipaddress
 import math
+import re
+import shlex
 import socket
 import tempfile
 from typing import Optional
@@ -26,8 +28,31 @@ from core.request_context import get_request_headers
 from config import config
 
 
-def _client() -> FileUploadClient:
-    return FileUploadClient(bearer_for_request(get_request_headers()))
+async def _client() -> FileUploadClient:
+    return FileUploadClient(await bearer_for_request(get_request_headers()))
+
+
+_DEFAULT_CONTENT_TYPE = "application/octet-stream"
+_CONTENT_TYPE = re.compile(r"[\w.+-]+/[\w.+-]+", re.ASCII)
+
+
+def _clean_content_type(content_type: Optional[str]) -> str:
+    """Return a bare ``type/subtype`` or raise.
+
+    content_type is model-controlled and ends up in shell commands and the
+    upload page, so only the plain media type is accepted (parameters such as
+    ``; charset=utf-8`` are dropped).
+    """
+    if content_type is None or not str(content_type).strip():
+        return _DEFAULT_CONTENT_TYPE
+    value = str(content_type).split(";", 1)[0].strip()
+    if len(value) > 127 or not _CONTENT_TYPE.fullmatch(value):
+        raise ToolError("content_type must be a media type such as text/csv")
+    return value
+
+
+# In-flight upload_file_from_url downloads (single event loop, so a plain counter).
+_url_uploads_active = 0
 
 
 def _check_total(size: int):
@@ -185,13 +210,14 @@ async def upload_file(file_name: str, content: str, encoding: str = "text",
             "Use start_chunked_upload and upload_chunk instead."
         )
     safe_name = sanitize_file_name(file_name)
+    resolved_type = _clean_content_type(content_type)
     digest = sha256_hex(data)
-    async with _client() as client:
+    async with await _client() as client:
         session = await client.create_session({
             "fileName": safe_name,
             "size": len(data),
             "mode": "DIRECT",
-            "contentType": content_type or "application/octet-stream",
+            "contentType": resolved_type,
             "sha256": digest,
         })
         upload_id = session.get("uploadId")
@@ -225,12 +251,13 @@ async def create_upload_link(file_name: str, total_size: int,
     if max_size_bytes is not None and (max_size_bytes <= 0 or total_size > max_size_bytes):
         raise ToolError("file size exceeds max_size_bytes")
     safe_name = sanitize_file_name(file_name)
-    async with _client() as client:
+    resolved_type = _clean_content_type(content_type)
+    async with await _client() as client:
         session = await client.create_session({
             "fileName": safe_name,
             "size": total_size,
             "mode": "DIRECT",
-            "contentType": content_type or "application/octet-stream",
+            "contentType": resolved_type,
             **({"sha256": sha256} if sha256 else {}),
         })
         upload_id = session.get("uploadId")
@@ -252,12 +279,14 @@ async def create_upload_link(file_name: str, total_size: int,
         "put": upload_url,
         "complete": complete_url,
         "name": safe_name,
-        "type": content_type or "application/octet-stream",
+        "type": resolved_type,
         "size": str(total_size),
     })
     return {
         "upload_id": upload_id,
-        "upload_page_url": f"{_upload_page_base()}?{page_query}",
+        # Signed URLs travel in the fragment: browsers never send it to a server,
+        # so it stays out of access logs, proxies and Referer headers.
+        "upload_page_url": f"{_upload_page_base()}#{page_query}",
         "upload_url": upload_url,
         "complete_url": complete_url,
         "expires_at": session.get("expiresAt"),
@@ -265,8 +294,8 @@ async def create_upload_link(file_name: str, total_size: int,
         "size": total_size,
         "curl_command": (
             "curl --fail-with-body --request PUT "
-            "--header 'Content-Type: " + (content_type or "application/octet-stream") + "' "
-            "--upload-file '/path/to/FILE' '" + upload_url + "'"
+            "--header " + shlex.quote("Content-Type: " + resolved_type) + " "
+            "--upload-file '/path/to/FILE' " + shlex.quote(upload_url)
         ),
         "next_step": "Open upload_page_url and choose the original file. The page uploads and completes it automatically. The curl command is an optional technical fallback.",
         "destination": resolved_destination,
@@ -283,48 +312,81 @@ async def upload_file_from_url(source_url: str, file_name: str,
     This is intended for clients that can provide a temporary HTTPS download URL
     for an attachment. File bytes never pass through the model or MCP JSON.
     """
-    source_url = await _validate_source_url(source_url)
+    global _url_uploads_active
+    # Cheap local validation first; nothing below touches the network.
+    if not isinstance(source_url, str) or not source_url.strip():
+        raise ToolError("source_url must be a non-empty URL")
     resolved_destination = _resolve_destination(destination)
     safe_name = sanitize_file_name(file_name)
-    max_bytes = config.MAX_TOTAL_BYTES
+    requested_type = _clean_content_type(content_type) if content_type else None
 
-    async with _client() as client:
+    async with await _client() as client:
+        # Prove the caller's token to publish-api before the server resolves
+        # or fetches anything on their behalf.
+        await client.verify_bearer()
+        if _url_uploads_active >= config.UPLOAD_FROM_URL_MAX_CONCURRENCY:
+            raise ToolError(
+                "Too many URL uploads are in progress on this server. Retry shortly."
+            )
+        _url_uploads_active += 1
         try:
-            # A separate client that never forwards credentials or follows redirects.
-            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0),
-                                         follow_redirects=False) as downloader, \
-                    downloader.stream("GET", source_url) as response:
-                if not _using_proxy():
-                    _check_connected_peer(response)
-                if response.status_code < 200 or response.status_code >= 300:
+            with tempfile.SpooledTemporaryFile(max_size=config.MAX_INLINE_BYTES,
+                                                mode="w+b") as file_obj:
+                deadline = config.UPLOAD_FROM_URL_TIMEOUT_SECONDS
+                try:
+                    total_size, digest, response_type = await asyncio.wait_for(
+                        _download_source(source_url, file_obj), timeout=deadline
+                    )
+                except asyncio.TimeoutError:
                     raise ToolError(
-                        f"source download failed with HTTP {response.status_code}"
-                    )
-                declared_size = response.headers.get("content-length")
-                if declared_size and int(declared_size) > max_bytes:
-                    raise ToolError(f"source file exceeds MAX_TOTAL_BYTES ({max_bytes} bytes)")
-                response_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
-                resolved_type = content_type or response_type or "application/octet-stream"
-                digest = hashlib.sha256()
-                total_size = 0
-                with tempfile.SpooledTemporaryFile(max_size=config.MAX_INLINE_BYTES,
-                                                    mode="w+b") as file_obj:
-                    async for data in response.aiter_bytes(config.MAX_CHUNK_BYTES):
-                        total_size += len(data)
-                        if total_size > max_bytes:
-                            raise ToolError(f"source file exceeds MAX_TOTAL_BYTES ({max_bytes} bytes)")
-                        digest.update(data)
-                        file_obj.write(data)
-                    if total_size == 0:
-                        raise ToolError("source URL returned an empty file")
-                    return await _upload_spooled_file(
-                        client, file_obj, safe_name, total_size, resolved_type,
-                        resolved_destination, digest.hexdigest(),
-                    )
-        except ToolError:
-            raise
-        except Exception as exc:
-            raise ToolError(f"source download failed ({type(exc).__name__})") from None
+                        f"source download did not finish within {deadline} seconds"
+                    ) from None
+                except ToolError:
+                    raise
+                except Exception as exc:
+                    raise ToolError(f"source download failed ({type(exc).__name__})") from None
+                if requested_type:
+                    resolved_type = requested_type
+                else:
+                    try:
+                        resolved_type = _clean_content_type(response_type)
+                    except ToolError:
+                        resolved_type = _DEFAULT_CONTENT_TYPE
+                return await _upload_spooled_file(
+                    client, file_obj, safe_name, total_size, resolved_type,
+                    resolved_destination, digest,
+                )
+        finally:
+            _url_uploads_active -= 1
+
+
+async def _download_source(source_url: str, file_obj):
+    """Validate and download source_url into file_obj; returns (size, sha256, content type)."""
+    source_url = await _validate_source_url(source_url)
+    max_bytes = config.MAX_TOTAL_BYTES
+    # A separate client that never forwards credentials or follows redirects.
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0),
+                                 follow_redirects=False) as downloader, \
+            downloader.stream("GET", source_url) as response:
+        if not _using_proxy():
+            _check_connected_peer(response)
+        if response.status_code < 200 or response.status_code >= 300:
+            raise ToolError(f"source download failed with HTTP {response.status_code}")
+        declared_size = response.headers.get("content-length")
+        if declared_size and declared_size.isdigit() and int(declared_size) > max_bytes:
+            raise ToolError(f"source file exceeds MAX_TOTAL_BYTES ({max_bytes} bytes)")
+        response_type = response.headers.get("content-type", "")
+        digest = hashlib.sha256()
+        total_size = 0
+        async for data in response.aiter_bytes(config.MAX_CHUNK_BYTES):
+            total_size += len(data)
+            if total_size > max_bytes:
+                raise ToolError(f"source file exceeds MAX_TOTAL_BYTES ({max_bytes} bytes)")
+            digest.update(data)
+            file_obj.write(data)
+        if total_size == 0:
+            raise ToolError("source URL returned an empty file")
+        return total_size, digest.hexdigest(), response_type
 
 
 @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "title": "Start Chunked Upload"})
@@ -342,10 +404,11 @@ async def start_chunked_upload(file_name: str, total_size: int, total_chunks: in
             f"use at least {math.ceil(total_size / config.MAX_CHUNK_BYTES)} chunks"
         )
     safe_name = sanitize_file_name(file_name)
-    async with _client() as client:
+    resolved_type = _clean_content_type(content_type)
+    async with await _client() as client:
         session = await client.create_session({
             "fileName": safe_name, "size": total_size, "mode": "CHUNKED",
-            "totalChunks": total_chunks, "contentType": content_type,
+            "totalChunks": total_chunks, "contentType": resolved_type,
             **({"sha256": sha256} if sha256 else {}),
         })
         upload_id = session.get("uploadId")
@@ -368,7 +431,7 @@ async def upload_chunk(upload_id: str, chunk_number: int, data_base64: str):
     data = decode_content(data_base64, "base64")
     if len(data) > config.MAX_CHUNK_BYTES:
         raise ToolError(f"Chunk is too large; maximum raw chunk size is {config.MAX_CHUNK_BYTES} bytes")
-    async with _client() as client:
+    async with await _client() as client:
         progress = await client.upload_bytes(upload_id, data, chunk_number)
     return {"upload_id": upload_id, "chunk_number": chunk_number,
             "received_chunks": progress.get("receivedChunks"),
@@ -380,7 +443,7 @@ async def upload_chunk(upload_id: str, chunk_number: int, data_base64: str):
 async def get_upload_status(upload_id: str):
     """Get progress and ownership-checked status for an upload session."""
     _check_upload_id(upload_id)
-    async with _client() as client:
+    async with await _client() as client:
         return await client.status(upload_id)
 
 
@@ -388,7 +451,7 @@ async def get_upload_status(upload_id: str):
 async def complete_upload(upload_id: str):
     """Complete a direct upload or merge a chunked upload."""
     _check_upload_id(upload_id)
-    async with _client() as client:
+    async with await _client() as client:
         return await client.complete(upload_id)
 
 
@@ -396,7 +459,7 @@ async def complete_upload(upload_id: str):
 async def abort_upload(upload_id: str):
     """Abort an upload session and invalidate its cached signed URL."""
     _check_upload_id(upload_id)
-    async with _client() as client:
+    async with await _client() as client:
         return await client.abort(upload_id)
 
 
@@ -409,13 +472,17 @@ if config.ENABLE_HANDOFF_TOOLS:
         resolved_destination = _resolve_destination(destination)
         _check_total(total_size)
         safe_name = sanitize_file_name(file_name)
-        async with _client() as client:
+        resolved_type = _clean_content_type(content_type)
+        async with await _client() as client:
             session = await client.create_session({"fileName": safe_name, "size": total_size,
-                "mode": "DIRECT", "contentType": content_type, **({"sha256": sha256} if sha256 else {})})
+                "mode": "DIRECT", "contentType": resolved_type, **({"sha256": sha256} if sha256 else {})})
         url = session.get("uploadUrl")
+        if not session.get("uploadId") or not isinstance(url, str) or not url:
+            raise ToolError("publish-api did not return a direct upload handoff")
         return {"upload_id": session.get("uploadId"), "upload_url": url,
                 "destination": resolved_destination,
-                "curl": f"curl --fail-with-body -X PUT -H 'Content-Type: application/octet-stream' --data-binary @FILE '{url}'"}
+                "curl": ("curl --fail-with-body -X PUT -H 'Content-Type: application/octet-stream' "
+                         "--data-binary @FILE " + shlex.quote(url))}
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "title": "Create Chunked Upload Handoff"})
     async def create_chunked_upload_session(file_name: str, total_size: int, total_chunks: int,
@@ -425,27 +492,31 @@ if config.ENABLE_HANDOFF_TOOLS:
         resolved_destination = _resolve_destination(destination)
         _check_total(total_size)
         safe_name = sanitize_file_name(file_name)
-        async with _client() as client:
+        resolved_type = _clean_content_type(content_type)
+        async with await _client() as client:
             session = await client.create_session({"fileName": safe_name, "size": total_size,
-                "mode": "CHUNKED", "totalChunks": total_chunks, "contentType": content_type,
+                "mode": "CHUNKED", "totalChunks": total_chunks, "contentType": resolved_type,
                 **({"sha256": sha256} if sha256 else {})})
         template = session.get("uploadUrlTemplate")
-        if not session.get("uploadId") or not template:
+        if not session.get("uploadId") or not isinstance(template, str) or not template:
             raise ToolError("publish-api did not return a chunk upload handoff")
+        # Quote the URL pieces literally and leave only "$n" for the shell to expand.
+        shell_url = '"$n"'.join(shlex.quote(part) if part else ""
+                                for part in template.split("{chunkNumber}"))
         return {"upload_id": session["uploadId"], "upload_url_template": template,
                 "destination": resolved_destination,
                 "max_chunk_bytes": config.MAX_CHUNK_BYTES,
                 "shell_example": (
                     "for n in $(seq " + str(config.CHUNK_NUMBER_START) + " $((TOTAL_CHUNKS-1))); do "
                     "curl --fail-with-body -X PUT -H 'Content-Type: application/octet-stream' "
-                    "--data-binary \"@chunk-$n\" '" + template.replace("{chunkNumber}", "$n") + "'; done"
+                    "--data-binary \"@chunk-$n\" " + shell_url + "; done"
                 )}
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "title": "Refresh Upload URL"})
     async def refresh_upload_url(upload_id: str):
         """Refresh and return the signed upload URL or URL template."""
         _check_upload_id(upload_id)
-        async with _client() as client:
+        async with await _client() as client:
             url = await client.presign(upload_id)
         return {"upload_id": upload_id, "upload_url": url}
 
